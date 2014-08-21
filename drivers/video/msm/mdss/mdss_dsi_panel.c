@@ -36,6 +36,7 @@ static struct dsi_panel_cmds cabc_off_sequence;
 static struct dsi_panel_cmds cabc_user_interface_image_sequence;
 static struct dsi_panel_cmds cabc_still_image_sequence;
 static struct dsi_panel_cmds cabc_video_image_sequence;
+static struct dsi_panel_cmds cabc_sre_sequence;
 
 static void mdss_dsi_panel_cmds_send(struct mdss_dsi_ctrl_pdata *ctrl,
 			struct dsi_panel_cmds *pcmds);
@@ -52,6 +53,57 @@ enum
 };
 
 static DEFINE_MUTEX(cabc_mutex);
+static int mdss_dsi_update_cabc_level(struct mdss_dsi_ctrl_pdata *ctrl_pdata)
+{
+	int ret = 0;
+	struct mdss_panel_info *pinfo = NULL;
+
+    if (ctrl_pdata == NULL) {
+	    pr_err("%s: Invalid input data\n", __func__);
+	    return -EINVAL;
+    }
+
+	pinfo = &(ctrl_pdata->panel_data.panel_info);
+
+    if (!pinfo->cabc_available)
+        return 0;
+
+	pr_info("%s: update cabc level=%d (%d) sre=%d (%d)", __func__,
+			pinfo->cabc_mode, pinfo->cabc_active,
+			pinfo->sre_enabled, pinfo->sre_active);
+
+	switch (pinfo->cabc_mode)
+	{
+		case 0:
+			set_backlight_pwm(0);
+			mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_off_sequence);
+			break;
+		case 1:
+			if (pinfo->sre_available && pinfo->sre_active)
+				mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_sre_sequence);
+			else if (pinfo->cabc_bl_max > 0 && !pinfo->cabc_active)
+				mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_off_sequence);
+			else
+				mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_user_interface_image_sequence);
+
+			set_backlight_pwm(1);
+			break;
+		case 2:
+			mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_still_image_sequence);
+			set_backlight_pwm(1);
+			break;
+		case 3:
+			mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_video_image_sequence);
+			set_backlight_pwm(1);
+			break;
+		default:
+			pr_err("%s: cabc level %d is not supported!\n",__func__, pinfo->cabc_mode);
+			ret = -EINVAL;
+			break;
+	}
+	return ret;
+}
+
 int mdss_dsi_panel_set_cabc(struct mdss_panel_data *pdata, int level)
 {
 	int ret = 0;
@@ -69,56 +121,65 @@ int mdss_dsi_panel_set_cabc(struct mdss_panel_data *pdata, int level)
     if (!pinfo->cabc_available)
         return 0;
 
-	pr_info("%s : %d \n", __func__, level);
-
 	mutex_lock(&cabc_mutex);
 
-	if (!pinfo->panel_power_on)
-	{
-		pr_info("%s: lcd is off,don't allow to set cabc\n", __func__);
-		pinfo->cabc_mode = level;
-		mutex_unlock(&cabc_mutex);
-		return 0;
+	if (level < 0 || level > 3) {
+		pr_err("%s: valid cabc values are 0-4\n", __func__);
+		goto out;
 	}
 
-	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 1);
+	pinfo->cabc_mode = level;
 
-	switch(level)
-	{
-		case 0:
-			set_backlight_pwm(0);
-			mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_off_sequence);
-			pinfo->cabc_mode = CABC_CLOSE;
-			break;
-		case 1:
-			mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_user_interface_image_sequence);
-			pinfo->cabc_mode = CABC_LOW_MODE;
-			set_backlight_pwm(1);
-			break;
-		case 2:
-			mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_still_image_sequence);
-			pinfo->cabc_mode = CABC_MIDDLE_MODE;
-			set_backlight_pwm(1);
-			break;
-		case 3:
-			mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_video_image_sequence);
-			pinfo->cabc_mode = CABC_HIGH_MODE;
-			set_backlight_pwm(1);
-			break;
-		default:
-			pr_err("%s Level %d is not supported!\n",__func__,level);
-			ret = -1;
-			break;
+	if (!pinfo->panel_power_on) {
+		pr_info("%s: lcd is off, queued cabc change\n", __func__);
+		goto out;
 	}
-	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 0);
+
+	ret = mdss_dsi_update_cabc_level(ctrl_pdata);
+
+out:
 	mutex_unlock(&cabc_mutex);
 	return ret;
 
 }
-
-static int set_cabc_resume_mode(struct mdss_panel_data *pdata, int mode)
+int mdss_dsi_panel_update_sre(struct mdss_panel_data *pdata, u32 bl_level)
 {
-	int ret;
+	int ret = 0;
+	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
+	struct mdss_panel_info *pinfo = NULL;
+
+	if (pdata == NULL)
+		return -EINVAL;
+
+	ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata, panel_data);
+	pinfo = &(ctrl_pdata->panel_data.panel_info);
+
+	if (!pinfo->cabc_mode || !pinfo->cabc_bl_max || !pinfo->sre_bl_threshold)
+		return 0;
+
+	// disable CABC above some backlight value since it's not effective at high
+	// brightness. optionally enable SRE when it's even higher to melt faces off.
+	if ((!pinfo->cabc_active || pinfo->sre_active) && bl_level <= pinfo->cabc_bl_max) {
+		pinfo->cabc_active = true;
+		pinfo->sre_active = false;
+		ret = mdss_dsi_update_cabc_level(ctrl_pdata);
+	} else if (bl_level > pinfo->cabc_bl_max) {
+		if (pinfo->sre_enabled && !pinfo->sre_active && bl_level >= pinfo->sre_bl_threshold) {
+			pinfo->cabc_active = false;
+			pinfo->sre_active = true;
+			ret = mdss_dsi_update_cabc_level(ctrl_pdata);
+		} else if (pinfo->cabc_active || pinfo->sre_active) {
+			pinfo->cabc_active = false;
+			pinfo->sre_active = false;
+			ret = mdss_dsi_update_cabc_level(ctrl_pdata);
+		}
+	}
+	return ret;
+}
+
+int mdss_dsi_panel_set_sre(struct mdss_panel_data *pdata, bool enable)
+{
+	int ret = 0;
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
 	struct mdss_panel_info *pinfo = NULL;
 
@@ -127,37 +188,18 @@ static int set_cabc_resume_mode(struct mdss_panel_data *pdata, int mode)
 	    return -EINVAL;
     }
 
-	ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata, panel_data);
+    ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata, panel_data);
 	pinfo = &(ctrl_pdata->panel_data.panel_info);
 
-    if (!pinfo->cabc_available)
+    if (!pinfo->cabc_available || !pinfo->sre_available ||
+            enable == pinfo->sre_enabled)
         return 0;
 
-	pr_info("%s : %d yxr \n", __func__, mode);
+	mutex_lock(&cabc_mutex);
+	pinfo->sre_enabled = enable;
+	pinfo->sre_active = false;
+	mutex_unlock(&cabc_mutex);
 
-	switch (mode)
-	{
-		case 0:
-			set_backlight_pwm(0);
-			mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_off_sequence);
-			break;
-		case 1:
-			mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_user_interface_image_sequence);
-			set_backlight_pwm(1);
-			break;
-		case 2:
-			mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_still_image_sequence);
-			set_backlight_pwm(1);
-			break;
-		case 3:
-			mdss_dsi_panel_cmds_send(ctrl_pdata, &cabc_video_image_sequence);
-			set_backlight_pwm(1);
-			break;
-		default:
-			pr_err("%s  %d is not supported!\n",__func__,mode);
-			ret = -1;
-			break;
-	}
 	return ret;
 }
 
@@ -753,16 +795,12 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 		mdss_dsi_panel_cmds_send(ctrl, &ctrl->on_cmds);
 
 #ifdef CONFIG_MACH_OPPO
-/* Xiaori.Yuan@Mobile Phone Software Dept.Driver, 2014/02/17  Add for set cabc */
 	set_backlight_pwm(1);
-	if (pdata->panel_info.cabc_mode != CABC_HIGH_MODE) {
-		set_cabc_resume_mode(pdata, pdata->panel_info.cabc_mode);
-	}
 
-	mutex_lock(&panel_calibration_mutex);
+	mdss_dsi_update_cabc_level(ctrl);
+
 	if (ctrl->calibration_available && ctrl->calibration_cmds.cmd_cnt)
 		mdss_dsi_panel_cmds_send(ctrl, &ctrl->calibration_cmds);
-	mutex_unlock(&panel_calibration_mutex);
 #endif
 
 	pr_debug("%s:-\n", __func__);
@@ -1464,6 +1502,15 @@ static int mdss_panel_parse_dt(struct device_node *np,
 
 	mdss_dsi_parse_dcs_cmds(np, &cabc_video_image_sequence,
 		"qcom,mdss-dsi-cabc-video-command", "qcom,mdss-dsi-off-command-state");
+
+	rc = mdss_dsi_parse_dcs_cmds(np, &cabc_sre_sequence,
+		"qcom,mdss-dsi-sre-ui-command", "qcom,mdss-dsi-off-command-state");
+
+	pinfo->sre_available = rc == 0 ? 1 : 0;
+
+	of_property_read_u32(np, "qcom,mdss-dsi-bl-sre-level", &pinfo->sre_bl_threshold);
+
+	of_property_read_u32(np, "qcom,mdss-dsi-bl-cabc-max-level", &pinfo->cabc_bl_max);
 
 	rc = mdss_dsi_parse_dcs_cmds(np, &ctrl_pdata->calibration_cmds,
 		"qcom,mdss-dsi-calibration-command", "qcom,mdss-dsi-calibration-command-state");
