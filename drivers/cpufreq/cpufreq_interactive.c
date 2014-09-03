@@ -119,8 +119,6 @@ static int timer_slack_val = DEFAULT_TIMER_SLACK;
 
 static bool io_is_busy;
 
-#define DOWN_LOW_LOAD_THRESHOLD 5
-
 /* Round to starting jiffy of next evaluation window */
 static u64 round_to_nw_start(u64 jif)
 {
@@ -309,15 +307,6 @@ static unsigned int choose_freq(
 	return freq;
 }
 
-static unsigned int calc_freq(struct cpufreq_interactive_cpuinfo *pcpu,
-	unsigned int load)
-{
-	unsigned int max = pcpu->policy->max;
-	unsigned int min = pcpu->policy->min;
-
-	return ((max - min) / 100) * load + min;
-}
-
 static u64 update_load(int cpu)
 {
 	struct cpufreq_interactive_cpuinfo *pcpu = &per_cpu(cpuinfo, cpu);
@@ -378,21 +367,17 @@ static void cpufreq_interactive_timer(unsigned long data)
 	cpu_load = loadadjfreq / pcpu->target_freq;
 	boosted = boost_val || now < boostpulse_endtime;
 
-	cpufreq_notify_utilization(pcpu->policy, cpu_load);
-
 	if (cpu_load >= go_hispeed_load || boosted) {
 		if (pcpu->target_freq < hispeed_freq) {
 			new_freq = hispeed_freq;
 		} else {
-			new_freq = calc_freq(pcpu, cpu_load);
+			new_freq = choose_freq(pcpu, loadadjfreq);
 
 			if (new_freq < hispeed_freq)
 				new_freq = hispeed_freq;
 		}
-	} else if (cpu_load <= DOWN_LOW_LOAD_THRESHOLD) {
-		new_freq = pcpu->policy->cpuinfo.min_freq;
 	} else {
-		new_freq = calc_freq(pcpu, cpu_load);
+		new_freq = choose_freq(pcpu, loadadjfreq);
 	}
 
 	if (pcpu->target_freq >= hispeed_freq &&
@@ -409,7 +394,7 @@ static void cpufreq_interactive_timer(unsigned long data)
 	pcpu->hispeed_validate_time = now;
 
 	if (cpufreq_frequency_table_target(pcpu->policy, pcpu->freq_table,
-					   new_freq, CPUFREQ_RELATION_C,
+					   new_freq, CPUFREQ_RELATION_L,
 					   &index)) {
 		spin_unlock_irqrestore(&pcpu->target_freq_lock, flags);
 		goto rearm;
