@@ -201,7 +201,7 @@
 		qcom,cont-splash-enabled;
 		qcom,ulps-enabled;
 		qcom,partial-update-enabled;
-		qcom,panel-roi-alignment = <900 4 0 2 540 2>;
+		qcom,panel-roi-alignment = <900 4 2 2 540 20>;
 	};
 
 	dsi_truly_1080_vid: qcom,mdss_dsi_truly_1080p_video {
@@ -427,7 +427,7 @@
 			23 01 00 00 01 00 02 b0 03];
 		qcom,ulps-enabled;
 		qcom,partial-update-enabled;
-		qcom,panel-roi-alignment = <900 4 0 2 540 2>;
+		qcom,panel-roi-alignment = <900 4 2 2 540 20>;
 	};
 
 	dsi_sharp_1080_cmd: qcom,mdss_dsi_sharp_1080p_cmd {
